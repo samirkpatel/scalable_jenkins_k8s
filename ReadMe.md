@@ -8,7 +8,7 @@ Prerequisites:
 1. Setup Jenkins Deployment
    You can deploy Jenkins at any namespace, but for better isolation it is recommended that you create a dedicated namespace.
 
-   cmd: kubectl create namespace jenkins
+          cmd: kubectl create namespace jenkins
 
 2. Create a Jenkins deployment that will assume role as master node, named jenkins-master.
    (Sample File Available inside jenkins-master folder).
@@ -21,7 +21,7 @@ Note: You can configure above setting with another port, but you need to reconfi
 
 4.  Deploy the Jenkins by running below command.
 
-    cmd: kubectl apply -f jenkins_deployment.yaml
+          cmd: kubectl apply -f jenkins_deployment.yaml
 
 5.  Add Kubernetes Service Account and Role for Jenkins.
     Jenkins needs to access the Kubernetes API, therefore you need to properly setup a Kubernetes Service Account and Role in order to represent Jenkins access for the Kubernetes API.
@@ -36,6 +36,24 @@ Note: You can configure above setting with another port, but you need to reconfi
           (You can use service_account.yaml inside jenkins_master)
 
 6.  Create required access Role and RoleBinding for jenkins-master service acount.
+    Refer the jenkins_role and jenkins_role_binding file inside jenkins-master.
+
+    Apply the role and role binding manifests.
+    
+          cmd:  kubectl apply jenkins_role.yaml jenkins_role_binding.yaml
+
+7. Add a Kubernetes Service to Access Jenkins.
+   We need expose jenkins-master pod via a respective service in order to access it from out side.
+   You can refer jenkins_service.yaml inside jenkins_mster folder.
+
+   Apply jenkins_service.yaml manifest
+
+          cmd: kubectl apply -f jenkins-service.yaml
+     
+
+
+
+   
 
 
 

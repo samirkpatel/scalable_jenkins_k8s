@@ -1,0 +1,16 @@
+kind: Service
+apiVersion: v1
+metadata:
+  name:  jenkins-master
+  namespace: jenkins
+spec:
+  selector:
+    app:  jenkins-master
+  type:  LoadBalancer
+  ports:
+  - name:  jenkins-master
+    port:  80
+    targetPort:  8080
+  - name:  jenkins-jnlp
+    port: 50000
+    targetPort: 50000
