@@ -10,7 +10,7 @@ spec:
   accessModes:
     - ReadWriteOnce
   hostPath:
-    path: "C:\Users\samir\Desktop\Work\Scalable_Jenkins_K8s\jenkins_master_pv"
+    path: "/C/Users/samir/Desktop/Work/Scalable_Jenkins_K8s/jenkins_master_pv"
 
 ---
 apiVersion: v1
