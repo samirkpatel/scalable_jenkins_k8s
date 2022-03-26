@@ -6,7 +6,7 @@ metadata:
 spec:
   selector:
     app:  jenkins-master
-  type:  LoadBalancer
+  type:  NodePort
   ports:
   - name:  jenkins-master
     port:  80
