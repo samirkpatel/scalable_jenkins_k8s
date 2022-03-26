@@ -26,15 +26,17 @@ spec:
         - name: jnlp-port
           containerPort: 50000
         volumeMounts:
-          - name: jenkins-home
-            mountPath: /var/jenkins_home
+          - name: jenkins-master
+            mountPath: "/var/jenkins_home"
         resources:
           requests:
             memory: "2Gi"
             cpu: "500m"
           limits:
-            memory: "4Gi"
-            cpu: "1000m"
+            memory: "3Gi"
+            cpu: "2000m"
       volumes:
-        - name: jenkins-home
-          emptyDir: {}
+        - name: jenkins-master
+          persistentVolumeClaim:
+            claimName: jenkins-master
+            readOnly: false

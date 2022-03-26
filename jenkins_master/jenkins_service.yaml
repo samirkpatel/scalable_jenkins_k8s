@@ -9,7 +9,7 @@ spec:
   type:  NodePort
   ports:
   - name:  jenkins-master
-    port:  80
+    port:  8080
     targetPort:  8080
   - name:  jenkins-jnlp
     port: 50000
