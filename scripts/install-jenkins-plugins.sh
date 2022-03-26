@@ -1,207 +1,292 @@
-#!/bin/bash
+#!/bin/bash -eu
+
+# Resolve dependencies and download plugins given on the command line
 #
-
-readonly PROGNAME=$(basename $0)
-readonly PROGDIR=$(readlink -m $(dirname $0))
-readonly ARGS="$@"
-
+# FROM jenkins
+# RUN install-plugins.sh docker-slaves github-branch-source
 #
-# Get up to date JSON file of stable plugins
-# 
-get_update_center() {
+# Environment variables:
+# REF: directory with preinstalled plugins. Default: /usr/share/jenkins/ref/plugins
+# JENKINS_WAR: full path to the jenkins.war. Default: /usr/share/jenkins/jenkins.war
+# JENKINS_UC: url of the Update Center. Default: ""
+# JENKINS_UC_EXPERIMENTAL: url of the Experimental Update Center for experimental versions of plugins. Default: ""
+# JENKINS_INCREMENTALS_REPO_MIRROR: url of the incrementals repo mirror. Default: ""
+# JENKINS_UC_DOWNLOAD: download url of the Update Center. Default: JENKINS_UC/download
+# CURL_OPTIONS When downloading the plugins with curl. Curl options. Default: -sSfL
+# CURL_CONNECTION_TIMEOUT When downloading the plugins with curl. <seconds> Maximum time allowed for connection. Default: 20
+# CURL_RETRY When downloading the plugins with curl. Retry request if transient problems occur. Default: 3
+# CURL_RETRY_DELAY When downloading the plugins with curl. <seconds> Wait time between retries. Default: 0
+# CURL_RETRY_MAX_TIME When downloading the plugins with curl. <seconds> Retry only within this period. Default: 60
 
-  echo "Fetching JSON from update center"
-  
-# fetch up to date update center
-  $CURL_CMD http://updates.jenkins-ci.org/stable/update-center.json -o $PLUGIN_TEMPDIR/update-center.json
+set -o pipefail
 
-# cleanup json
-  sed -i 's|updateCenter.post(||g' $PLUGIN_TEMPDIR/update-center.json
-  sed -i 's|);||g' $PLUGIN_TEMPDIR/update-center.json
+echo "WARN: install-plugins.sh is deprecated, please switch to jenkins-plugin-cli"
+
+JENKINS_WAR=${JENKINS_WAR:-/usr/share/jenkins/jenkins.war}
+
+. /usr/local/bin/jenkins-support
+
+REF_DIR="${REF}/plugins"
+FAILED="$REF_DIR/failed-plugins.txt"
+
+getLockFile() {
+    printf '%s' "$REF_DIR/${1}.lock"
 }
 
-#
-# Fetch and install plugin
-#
-fetch_plugin()
-{
-  local DEP_LOOP
-  local DEPENDENCIES
-  local DEPENDENCY
-  local URL
-  local VERSION
-  local SFILENAME
-  local FFILENAME
-  local PPLUGIN
-  local OPTIONALP
-  local FPLUGIN=$1
-  
-  if [ ! -z "$EXCLUDED_PLUGINS" ]; then
-  for PPLUGIN in $EXCLUDED_PLUGINS
-  do
-    if [ "$FPLUGIN" = "$PPLUGIN" ]; then
-    echo "$FPLUGIN is already provided, exiting"
-    return
+getArchiveFilename() {
+    printf '%s' "$REF_DIR/${1}.jpi"
+}
+
+download() {
+    local plugin originalPlugin version lock ignoreLockFile url
+    plugin="$1"
+    version="${2:-latest}"
+    ignoreLockFile="${3:-}"
+    url="${4:-}"
+    lock="$(getLockFile "$plugin")"
+
+    if [[ $ignoreLockFile ]] || mkdir "$lock" &>/dev/null; then
+        if ! doDownload "$plugin" "$version" "$url"; then
+            # some plugin don't follow the rules about artifact ID
+            # typically: docker-plugin
+            originalPlugin="$plugin"
+            plugin="${plugin}-plugin"
+            if ! doDownload "$plugin" "$version" "$url"; then
+                echo "Failed to download plugin: $originalPlugin or $plugin" >&2
+                echo "Not downloaded: ${originalPlugin}" >> "$FAILED"
+                return 1
+            fi
+        fi
+
+        if ! checkIntegrity "$plugin"; then
+            echo "Downloaded file is not a valid ZIP: $(getArchiveFilename "$plugin")" >&2
+            echo "Download integrity: ${plugin}" >> "$FAILED"
+            return 1
+        fi
+
+        resolveDependencies "$plugin"
     fi
-  done
-  fi
+}
 
-  URL=`cat $PLUGIN_TEMPDIR/update-center.json | python -c "import sys, json; print json.load(sys.stdin)[\"plugins\"][\"$FPLUGIN\"][\"url\"]"`
-  VERSION=`cat $PLUGIN_TEMPDIR/update-center.json | python -c "import sys, json; print json.load(sys.stdin)[\"plugins\"][\"$FPLUGIN\"][\"version\"]"`
-  
-  SFILENAME=`basename $URL | sed -e "s|.hpi|.jpi|g"`
-  FFILENAME=`basename $URL | sed -e "s|.hpi|-$VERSION.jpi|g"`
+doDownload() {
+    local plugin version url jpi
+    plugin="$1"
+    version="$2"
+    url="$3"
+    jpi="$(getArchiveFilename "$plugin")"
 
-  INCLUDEDPLUGINS="$INCLUDEDPLUGINS$FPLUGIN:$VERSION\n"
-  
-  if [ ! -f $PLUGIN_TEMPDIR/$FFILENAME ]; then
-  echo "Downloading $FPLUGIN"
-  $CURL_CMD $URL -o $PLUGIN_TEMPDIR/$FFILENAME
-  fi
-
-  cp $PLUGIN_TEMPDIR/$FFILENAME $PLUGINS_DIR/$SFILENAME
-
-  DEPENDENCIES=`cat $PLUGIN_TEMPDIR/update-center.json | python -c "import sys, json; print json.load(sys.stdin)[\"plugins\"][\"$FPLUGIN\"][\"dependencies\"]"`
-  
-  if [ "$DEPENDENCIES" != "[]" ]; then
-  
-  for DEP_LOOP in 0 1 2 3 4 5 6 7 8 9 10; do
-    DEPENDENCY=`cat $PLUGIN_TEMPDIR/update-center.json | python -c "import sys, json; print json.load(sys.stdin)[\"plugins\"][\"$FPLUGIN\"][\"dependencies\"][$DEP_LOOP][\"name\"]" 2>/dev/null || true`
-  
-    # No more dependency, exit loop
-    if [ "$DEPENDENCY" = "" ]; then
-    break;
+    # If plugin already exists and is the same version do not download
+    if test -f "$jpi" && unzip -p "$jpi" META-INF/MANIFEST.MF | tr -d '\r' | grep "^Plugin-Version: ${version}$" > /dev/null; then
+        echo "Using provided plugin: $plugin"
+        return 0
     fi
-  
-    OPTIONALP=`cat $PLUGIN_TEMPDIR/update-center.json | python -c "import sys, json; print json.load(sys.stdin)[\"plugins\"][\"$FPLUGIN\"][\"dependencies\"][$DEP_LOOP][\"optional\"]" 2>/dev/null|| true`
-  
-    # Don't fetch optional dependencies
-    if [ "$OPTIONALP" = "True" ]; then
-    echo "$DEPENDENCY plugin is optional, it won't be included"
-    continue;
+
+    if [[ -n $url ]] ; then
+        echo "Will use url=$url"
+    elif [[ "$version" == "latest" && -n "$JENKINS_UC_LATEST" ]]; then
+        # If version-specific Update Center is available, which is the case for LTS versions,
+        # use it to resolve latest versions.
+        url="$JENKINS_UC_LATEST/latest/${plugin}.hpi"
+    elif [[ "$version" == "experimental" && -n "$JENKINS_UC_EXPERIMENTAL" ]]; then
+        # Download from the experimental update center
+        url="$JENKINS_UC_EXPERIMENTAL/latest/${plugin}.hpi"
+    elif [[ "$version" == incrementals* ]] ; then
+        # Download from Incrementals repo: https://jenkins.io/blog/2018/05/15/incremental-deployment/
+        # Example URL: https://repo.jenkins-ci.org/incrementals/org/jenkins-ci/plugins/workflow/workflow-support/2.19-rc289.d09828a05a74/workflow-support-2.19-rc289.d09828a05a74.hpi
+        local groupId incrementalsVersion
+        # add a trailing ; so the \n gets added to the end
+        readarray -t "-d;" arrIN <<<"${version};";
+        unset 'arrIN[-1]';
+        groupId=${arrIN[1]}
+        incrementalsVersion=${arrIN[2]}
+        url="${JENKINS_INCREMENTALS_REPO_MIRROR}/$(echo "${groupId}" | tr '.' '/')/${plugin}/${incrementalsVersion}/${plugin}-${incrementalsVersion}.hpi"
+    else
+        JENKINS_UC_DOWNLOAD=${JENKINS_UC_DOWNLOAD:-"$JENKINS_UC/download"}
+        url="$JENKINS_UC_DOWNLOAD/plugins/$plugin/$version/${plugin}.hpi"
     fi
-  
-    fetch_plugin $DEPENDENCY
-  done
-  fi
+
+    echo "Downloading plugin: $plugin from $url"
+    # We actually want to allow variable value to be split into multiple options passed to curl.
+    # This is needed to allow long options and any options that take value.
+    # shellcheck disable=SC2086
+    retry_command curl ${CURL_OPTIONS:--sSfL} --connect-timeout "${CURL_CONNECTION_TIMEOUT:-20}" --retry "${CURL_RETRY:-3}" --retry-delay "${CURL_RETRY_DELAY:-0}" --retry-max-time "${CURL_RETRY_MAX_TIME:-60}" "$url" -o "$jpi"
+    return $?
 }
 
-usage() {
-  cat <<- EOF
-  usage: $PROGNAME options
-  
-  Install or update Jenkins Plugins.
+checkIntegrity() {
+    local plugin jpi
+    plugin="$1"
+    jpi="$(getArchiveFilename "$plugin")"
 
-  OPTIONS:
-     -p --plugins  file containing plugins list
-     -x --xplugins   file containing excluded plugins list
-     -d --plugindir  directory where to deploy plugins (.jpi)
- 
-  Examples:
-
-     Run:
-     $PROGNAME --plugins okplugins --excludedplugins nokplugins --plugindir /var/lib/myjenkins/plugins
-EOF
-
-  exit 1
+    unzip -t -qq "$jpi" >/dev/null
+    return $?
 }
 
-#
-# Parse command line
-#
-cmdline() {
-  # got this idea from here:
-  # http://kirk.webfinish.com/2009/10/bash-shell-script-to-use-getopts-with-gnu-style-long-positional-parameters/
-  local arg=
-  for arg
-  do
-    local delim=""
-    case "$arg" in
-      #translate --gnu-long-options to -g (short options)
-      --plugins)     args="${args}-p ";;
-      --xplugins)    args="${args}-e ";;
-      --plugindir)     args="${args}-d ";;
-      --help)      args="${args}-h ";;
-      --verbose)     args="${args}-v ";;
-      --debug)       args="${args}-x ";;
-      #pass through anything else
-      *) [[ "${arg:0:1}" == "-" ]] || delim="\""
-        args="${args}${delim}${arg}${delim} ";;
-    esac
-  done
+resolveDependencies() {
+    local plugin jpi dependencies
+    plugin="$1"
+    jpi="$(getArchiveFilename "$plugin")"
 
-  #Reset the positional parameters to the short options
-  eval set -- $args
+    dependencies="$(unzip -p "$jpi" META-INF/MANIFEST.MF | tr -d '\r' | tr '\n' '|' | sed -e 's#| ##g' | tr '|' '\n' | grep "^Plugin-Dependencies: " | sed -e 's#^Plugin-Dependencies: ##')"
 
-  while getopts "hvxp:e:d:" OPTION
-  do
-     case $OPTION in
-     v)
-       readonly VERBOSE=1
-       ;;
-     x)
-       readonly DEBUG='-x'
-       set -x
-       ;;
-     h)
-       usage
-       exit 0
-       ;;
-     p)
-       readonly PLUGINS_FILE=$OPTARG
-       ;;
-     e)
-       readonly EXCLUDED_PLUGINS_FILE=$OPTARG
-       ;;
-     d)
-       readonly PLUGINS_DIR=$OPTARG
-       ;;
-    esac
-  done
+    if [[ ! $dependencies ]]; then
+        echo " > $plugin has no dependencies"
+        return
+    fi
 
-  if [ -z "$PLUGINS_FILE" ]; then
-    echo "You must provide plugin file"
-    usage
-  fi
+    echo " > $plugin depends on $dependencies"
 
-  if [ -z "$PLUGINS_DIR" ]; then
-    echo "You must provide plugin directory"
-    usage
-  fi
+    IFS=',' read -r -a array <<< "$dependencies"
 
-  readonly PLUGINS=`cat $PLUGINS_FILE`
-
-  if [ ! -z "$EXCLUDED_PLUGINS_FILE" ]; then
-    readonly EXCLUDED_PLUGINS=`cat $EXCLUDED_PLUGINS_FILE`
-  fi
-
-  if [ "$VERBOSE" = "1" ]; then
-  CURL_CMD="curl -L"
-  else
-  CURL_CMD="curl -L --silent"
-  fi 
-
-  if [ "$DEBUG" = "-x" ]; then
-  CURL_CMD="$CURL_CMD -v"
-  fi 
+    for d in "${array[@]}"
+    do
+        plugin="$(cut -d':' -f1 - <<< "$d")"
+        if [[ $d == *"resolution:=optional"* ]]; then
+            echo "Skipping optional dependency $plugin"
+        else
+            local pluginInstalled
+            if pluginInstalled="$(echo -e "${bundledPlugins}\n${installedPlugins}" | grep "^${plugin}:")"; then
+                pluginInstalled="${pluginInstalled//[$'\r']}"
+                local versionInstalled; versionInstalled=$(versionFromPlugin "${pluginInstalled}")
+                local minVersion; minVersion=$(versionFromPlugin "${d}")
+                if versionLT "${versionInstalled}" "${minVersion}"; then
+                    echo "Upgrading bundled dependency $d ($minVersion > $versionInstalled)"
+                    download "$plugin" &
+                else
+                    echo "Skipping already installed dependency $d ($minVersion <= $versionInstalled)"
+                fi
+            else
+                download "$plugin" &
+            fi
+        fi
+    done
+    wait
 }
 
- 
+bundledPlugins() {
+    if [ -f "$JENKINS_WAR" ]
+    then
+        TEMP_PLUGIN_DIR=/tmp/plugintemp.$$
+        for i in $(jar tf "$JENKINS_WAR" | grep -E '[^detached-]plugins.*\..pi' | sort)
+        do
+            rm -fr $TEMP_PLUGIN_DIR
+            mkdir -p $TEMP_PLUGIN_DIR
+            PLUGIN=$(basename "$i"|cut -f1 -d'.')
+            (cd $TEMP_PLUGIN_DIR;jar xf "$JENKINS_WAR" "$i";jar xvf "$TEMP_PLUGIN_DIR/$i" META-INF/MANIFEST.MF >/dev/null 2>&1)
+            VER=$(grep -E -i Plugin-Version "$TEMP_PLUGIN_DIR/META-INF/MANIFEST.MF"|cut -d: -f2|sed 's/ //')
+            echo "$PLUGIN:$VER"
+        done
+        rm -fr $TEMP_PLUGIN_DIR
+    else
+        echo "war not found, installing all plugins: $JENKINS_WAR"
+    fi
+}
+
+versionFromPlugin() {
+    local plugin=$1
+    if [[ $plugin =~ .*:.* ]]; then
+        echo "${plugin##*:}"
+    else
+        echo "latest"
+    fi
+
+}
+
+installedPlugins() {
+    for f in "$REF_DIR"/*.jpi; do
+        echo "$(basename "$f" | sed -e 's/\.jpi//'):$(get_plugin_version "$f")"
+    done
+}
+
+jenkinsMajorMinorVersion() {
+    if [[ -f "$JENKINS_WAR" ]]; then
+        local version major minor
+        version="$(java -jar "$JENKINS_WAR" --version)"
+        major="$(echo "$version" | cut -d '.' -f 1)"
+        minor="$(echo "$version" | cut -d '.' -f 2)"
+        echo "$major.$minor"
+    else
+        echo ""
+    fi
+}
+
 main() {
+    local plugin jenkinsVersion
+    local plugins=()
 
-  cmdline $ARGS
+    mkdir -p "$REF_DIR" || exit 1
+    rm -f "$FAILED"
 
-  readonly PLUGIN_TEMPDIR=`mktemp -d /tmp/batchjpi.XXXXXXX`
+    # Read plugins from stdin or from the command line arguments
+    if [[ ($# -eq 0) ]]; then
+        while read -r line || [ "$line" != "" ]; do
+            # Remove leading/trailing spaces, comments, and empty lines
+            plugin=$(echo "${line}" | tr -d '\r' | sed -e 's/^[ \t]*//g' -e 's/[ \t]*$//g' -e 's/[ \t]*#.*$//g' -e '/^[ \t]*$/d')
 
-  get_update_center
+            # Avoid adding empty plugin into array
+            if [ ${#plugin} -ne 0 ]; then
+                plugins+=("${plugin}")
+            fi
+        done
+    else
+        plugins=("$@")
+    fi
 
-  for PLUGIN in $PLUGINS
-  do
-  echo "Fetching plugin $PLUGIN and dependencies" 
-  fetch_plugin $PLUGIN
-  done
+    # Create lockfile manually before first run to make sure any explicit version set is used.
+    echo "Creating initial locks..."
+    for plugin in "${plugins[@]}"; do
+        mkdir "$(getLockFile "${plugin%%:*}")"
+    done
 
-  rm -rf $PLUGIN_TEMPDIR
+    echo "Analyzing war $JENKINS_WAR..."
+    bundledPlugins="$(bundledPlugins)"
+
+    echo "Registering preinstalled plugins..."
+    installedPlugins="$(installedPlugins)"
+
+    # Get the update center URL based on the jenkins version
+    jenkinsVersion="$(jenkinsMajorMinorVersion)"
+    # shellcheck disable=SC2086
+    jenkinsUcJson=$(curl ${CURL_OPTIONS:--sSfL} -o /dev/null -w "%{url_effective}" "${JENKINS_UC}/update-center.json?version=${jenkinsVersion}")
+    if [ -n "${jenkinsUcJson}" ]; then
+        JENKINS_UC_LATEST=${jenkinsUcJson//update-center.json/}
+        echo "Using version-specific update center: $JENKINS_UC_LATEST..."
+    else
+        JENKINS_UC_LATEST=
+    fi
+
+    echo "Downloading plugins..."
+    for plugin in "${plugins[@]}"; do
+        local reg='^([^:]+):?([^:]+)?:?([^:]+)?:?(http.+)?'
+        if [[ $plugin =~ $reg ]]; then
+            local pluginId="${BASH_REMATCH[1]}"
+            local version="${BASH_REMATCH[2]}"
+            local lock="${BASH_REMATCH[3]}"
+            local url="${BASH_REMATCH[4]}"
+            download "$pluginId" "$version" "${lock:-true}" "${url}" &
+        else
+          echo "Skipping the line '${plugin}' as it does not look like a reference to a plugin"
+        fi
+    done
+    wait
+
+    echo
+    echo "WAR bundled plugins:"
+    echo "${bundledPlugins}"
+    echo
+    echo "Installed plugins:"
+    installedPlugins
+
+    if [[ -f $FAILED ]]; then
+        echo "Some plugins failed to download!" "$(<"$FAILED")" >&2
+        exit 1
+    fi
+
+    echo "Cleaning up locks"
+    find "$REF_DIR" -regex ".*.lock" | while read -r filepath; do
+        rm -r "$filepath"
+    done
+
 }
 
-main
+main "$@"
