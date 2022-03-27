@@ -1,0 +1,42 @@
+pipeline{
+    agent{
+        label "node"
+    }
+    stages{
+        stage("A"){
+            steps{
+                echo "========executing A========"
+            }
+            
+        }
+        stage("MVN Build.."){
+            steps{
+                echo "Running Maven Build..."
+            }
+        }
+
+        stage("Building Docker Image ..."){
+            steps{
+                echo "Building Docker Image"
+            }
+        }
+
+        stage("Pushing Docker Image to Nexus"){
+            steps{
+                echo "Pushing Docker Image to Nexus"
+            }
+        }
+    }
+
+    post{
+        always{
+            echo "====++++always++++===="
+        }
+        success{
+            echo "====++++only when successful++++===="
+        }
+        failure{
+            echo "====++++only when failed++++===="
+        }
+    }
+}
